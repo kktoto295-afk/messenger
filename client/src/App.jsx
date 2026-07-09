@@ -143,17 +143,26 @@ function App() {
               </div>
             </div>
             <div className="messages">
-              {messages.map(m => (
-                <div key={m.id} className={`message ${m.sender_id === user.id ? 'own' : 'other'}`}>
-                  {m.text && <div>{m.text}</div>}
-                  {m.file_url && (
-                    <div className="message-file">
-                      <a href={`${API}${m.file_url}`} target="_blank" rel="noopener noreferrer">{m.file_name || 'File'}</a>
+              {messages.map(m => {
+                const isOwn = m.sender_id === user.id
+                return (
+                  <div key={m.id} className={`msg ${isOwn ? 'right-msg' : 'left-msg'}`}>
+                    <div className="msg-img">{isOwn ? user.display_name?.[0]?.toUpperCase() || '?' : selectedUser.display_name?.[0]?.toUpperCase() || '?'}</div>
+                    <div className="msg-bubble">
+                      <div className="msg-info">
+                        <div className="msg-info-name">{isOwn ? user.display_name : selectedUser.display_name}</div>
+                        <div className="msg-info-time">{new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                      </div>
+                      {m.text && <div className="msg-text">{m.text}</div>}
+                      {m.file_url && (
+                        <div className="msg-file">
+                          <a href={`${API}${m.file_url}`} target="_blank" rel="noopener noreferrer">{m.file_name || 'File'}</a>
+                        </div>
+                      )}
                     </div>
-                  )}
-                  <div className="message-time">{new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-                </div>
-              ))}
+                  </div>
+                )
+              })}
               <div ref={messagesEndRef} />
             </div>
             <div className="file-preview" id="filePreview"></div>
