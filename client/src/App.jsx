@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { io } from 'socket.io-client'
 
 const API = ''
-let socket = null
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token'))
@@ -12,12 +10,11 @@ function App() {
   const [messages, setMessages] = useState([])
   const [text, setText] = useState('')
   const [onlineUsers, setOnlineUsers] = useState([])
-  const [typing, setTyping] = useState({})
   const [mobileView, setMobileView] = useState('list')
   const [page, setPage] = useState('landing')
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
-  const typingTimeoutRef = useRef(null)
+  const pollingRef = useRef(null)
 
   useEffect(() => {
     if (!token) return
@@ -28,21 +25,37 @@ function App() {
 
   useEffect(() => {
     if (!user) return
-    socket = io({ auth: { token } })
-    socket.on('online-users', setOnlineUsers)
-    socket.on('new-message', (msg) => {
-      setMessages(prev => {
-        if (prev.some(m => m.id === msg.id)) return prev
-        if (msg.sender_id === selectedUser?.id || msg.receiver_id === selectedUser?.id) {
-          return [...prev, msg]
-        }
-        return prev
-      })
-    })
-    socket.on('typing', ({ user_id }) => setTyping(prev => ({ ...prev, [user_id]: true })))
-    socket.on('stop-typing', ({ user_id }) => setTyping(prev => ({ ...prev, [user_id]: false })))
-    return () => { socket?.disconnect() }
-  }, [user, selectedUser?.id])
+    const hb = setInterval(() => {
+      fetch(`${API}/api/heartbeat`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    }, 30000)
+    fetch(`${API}/api/heartbeat`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    return () => clearInterval(hb)
+  }, [user, token])
+
+  useEffect(() => {
+    if (!user) return
+    const fetchOnline = async () => {
+      const r = await fetch(`${API}/api/online`, { headers: { Authorization: `Bearer ${token}` } })
+      if (r.ok) setOnlineUsers(await r.json())
+    }
+    fetchOnline()
+    const interval = setInterval(fetchOnline, 10000)
+    return () => clearInterval(interval)
+  }, [user, token])
+
+  useEffect(() => {
+    if (!user || !selectedUser) {
+      if (pollingRef.current) clearInterval(pollingRef.current)
+      return
+    }
+    const fetchMessages = async () => {
+      const r = await fetch(`${API}/api/messages/${selectedUser.id}`, { headers: { Authorization: `Bearer ${token}` } })
+      if (r.ok) setMessages(await r.json())
+    }
+    fetchMessages()
+    pollingRef.current = setInterval(fetchMessages, 2000)
+    return () => clearInterval(pollingRef.current)
+  }, [user, token, selectedUser?.id])
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -51,13 +64,9 @@ function App() {
     setUsers(await r.json())
   }
 
-  const loadMessages = async (userId) => {
-    const r = await fetch(`${API}/api/messages/${userId}`, { headers: { Authorization: `Bearer ${token}` } })
-    setMessages(await r.json())
-  }
-
   const selectUser = (u) => {
-    setSelectedUser(u); loadMessages(u.id); setMobileView('chat'); setTyping({})
+    setSelectedUser(u)
+    setMobileView('chat')
   }
 
   const sendMessage = async () => {
@@ -72,20 +81,14 @@ function App() {
       fileData = await r.json()
       fileInputRef.current.value = ''
     }
-    socket.emit('send-message', { receiver_id: selectedUser.id, text: text.trim(), ...fileData })
+    await fetch(`${API}/api/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ receiver_id: selectedUser.id, text: text.trim(), ...fileData })
+    })
     setText('')
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
-    socket.emit('stop-typing', { receiver_id: selectedUser.id })
-  }
-
-  const handleTyping = (e) => {
-    setText(e.target.value)
-    if (!typingTimeoutRef.current) socket.emit('typing', { receiver_id: selectedUser.id })
-    clearTimeout(typingTimeoutRef.current)
-    typingTimeoutRef.current = setTimeout(() => {
-      socket.emit('stop-typing', { receiver_id: selectedUser.id })
-      typingTimeoutRef.current = null
-    }, 1000)
+    const r = await fetch(`${API}/api/messages/${selectedUser.id}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (r.ok) setMessages(await r.json())
   }
 
   const handleKeyDown = (e) => {
@@ -108,7 +111,7 @@ function App() {
             <span className="chat-list-icon">G</span>
             <span>ГусьГусь</span>
           </div>
-          <button className="logout-btn" onClick={() => { setToken(null); localStorage.removeItem('token'); socket?.disconnect() }}>
+          <button className="logout-btn" onClick={() => { setToken(null); localStorage.removeItem('token') }}>
             Выйти
           </button>
         </div>
@@ -139,7 +142,6 @@ function App() {
                 </div>
               </div>
             </div>
-            {typing[selectedUser.id] && <div className="typing-indicator">печатает...</div>}
             <div className="messages">
               {messages.map(m => (
                 <div key={m.id} className={`message ${m.sender_id === user.id ? 'own' : 'other'}`}>
@@ -157,7 +159,7 @@ function App() {
             <div className="file-preview" id="filePreview"></div>
             <div className="message-input-area">
               <button className="attach-btn" onClick={() => fileInputRef.current?.click()}>&#128206;</button>
-              <input type="text" placeholder={`Написать @${selectedUser.display_name}`} value={text} onChange={handleTyping} onKeyDown={handleKeyDown} />
+              <input type="text" placeholder={`Написать @${selectedUser.display_name}`} value={text} onChange={e => setText(e.target.value)} onKeyDown={handleKeyDown} />
               <button onClick={sendMessage}>Отправить</button>
               <input type="file" ref={fileInputRef} style={{ display: 'none' }}
                 onChange={(e) => { const p = document.getElementById('filePreview'); if (p) p.textContent = e.target.files[0]?.name || '' }}
@@ -200,7 +202,7 @@ function LandingPage({ onGetStarted }) {
           <div className="feature-card">
             <div className="feature-icon">&#128172;</div>
             <h3>Мгновенные сообщения</h3>
-            <p>Сообщения доставляются в реальном времени через WebSocket. Вы никогда не пропустите важное.</p>
+            <p>Сообщения доставляются в реальном времени. Вы никогда не пропустите важное.</p>
           </div>
           <div className="feature-card">
             <div className="feature-icon">&#128274;</div>
@@ -233,7 +235,7 @@ function LandingPage({ onGetStarted }) {
       <footer className="landing-footer">
         <div className="landing-footer-inner">
           <div className="landing-footer-logo">ГусьГусь</div>
-          <p>© 2026 ГусьГусь. Все права защищены. Сделано с ❤️ для друзей.</p>
+          <p>© 2026 ГусьГусь. Все права защищены.</p>
         </div>
       </footer>
     </div>

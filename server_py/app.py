@@ -2,8 +2,8 @@ import os
 import uuid
 import bcrypt
 import jwt
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_from_directory
-from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from db import init_db, find_user_by_username, find_user_by_id, create_user, get_users, get_messages, add_message
@@ -13,27 +13,12 @@ app = Flask(__name__, static_folder='../client/dist', static_url_path='')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 CORS(app)
 
-socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
-
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 init_db()
 
-online_users = {}
-
-
-def get_user_id_from_token():
-    auth_data = request.event.get('auth', {}) if hasattr(request, 'event') else {}
-    token = auth_data.get('token')
-    if not token:
-        return None
-    try:
-        decoded = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-        return decoded['id']
-    except:
-        return None
-
+heartbeats = {}
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -96,6 +81,46 @@ def messages(user_id):
     return jsonify(get_messages(payload['id'], user_id))
 
 
+@app.route('/api/messages', methods=['POST'])
+def send_message():
+    payload = auth_middleware(request)
+    if not payload:
+        return jsonify({'error': 'Unauthorized'}), 401
+    data = request.get_json()
+    message = add_message(
+        payload['id'],
+        data.get('receiver_id'),
+        data.get('text', ''),
+        data.get('file_url'),
+        data.get('file_name'),
+        data.get('file_size')
+    )
+    return jsonify(message)
+
+
+@app.route('/api/heartbeat', methods=['POST'])
+def heartbeat():
+    payload = auth_middleware(request)
+    if not payload:
+        return jsonify({'error': 'Unauthorized'}), 401
+    heartbeats[payload['id']] = datetime.utcnow()
+    cutoff = datetime.utcnow() - timedelta(seconds=60)
+    for uid in list(heartbeats.keys()):
+        if heartbeats[uid] < cutoff:
+            del heartbeats[uid]
+    return jsonify({'ok': True})
+
+
+@app.route('/api/online')
+def online():
+    payload = auth_middleware(request)
+    if not payload:
+        return jsonify({'error': 'Unauthorized'}), 401
+    cutoff = datetime.utcnow() - timedelta(seconds=60)
+    online_ids = [uid for uid, ts in heartbeats.items() if ts > cutoff]
+    return jsonify(online_ids)
+
+
 @app.route('/api/upload', methods=['POST'])
 def upload():
     payload = auth_middleware(request)
@@ -126,60 +151,6 @@ def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-@socketio.on('connect')
-def handle_connect():
-    user_id = get_user_id_from_token()
-    if user_id is None:
-        return False
-    online_users[user_id] = request.sid
-    emit('online-users', list(online_users.keys()), broadcast=True)
-
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    for uid, sid in list(online_users.items()):
-        if sid == request.sid:
-            del online_users[uid]
-            emit('online-users', list(online_users.keys()), broadcast=True)
-            break
-
-
-@socketio.on('send-message')
-def handle_send_message(data):
-    user_id = get_user_id_from_token()
-    if user_id is None:
-        return
-
-    message = add_message(
-        user_id,
-        data.get('receiver_id'),
-        data.get('text', ''),
-        data.get('file_url'),
-        data.get('file_name'),
-        data.get('file_size')
-    )
-
-    receiver_sid = online_users.get(data.get('receiver_id'))
-    if receiver_sid:
-        emit('new-message', message, to=receiver_sid)
-    emit('new-message', message, to=request.sid)
-
-
-@socketio.on('typing')
-def handle_typing(data):
-    receiver_sid = online_users.get(data.get('receiver_id'))
-    if receiver_sid:
-        user_id = get_user_id_from_token()
-        emit('typing', {'user_id': user_id}, to=receiver_sid)
-
-
-@socketio.on('stop-typing')
-def handle_stop_typing(data):
-    receiver_sid = online_users.get(data.get('receiver_id'))
-    if receiver_sid:
-        emit('stop-typing', {'user_id': get_user_id_from_token()}, to=receiver_sid)
-
-
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
@@ -189,4 +160,4 @@ def serve(path):
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
